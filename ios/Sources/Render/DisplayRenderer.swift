@@ -138,7 +138,7 @@ final class DisplayRenderer {
         pass.colorAttachments[0].storeAction = .store
 
         guard let cmd = queue.makeCommandBuffer(),
-              let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+              let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return 5 }
 
         var scale = letterboxScale(pixelBuffer: pb, drawableSize: drawableSize)
         var cc = colorConversion(for: pb)
