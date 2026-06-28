@@ -1,0 +1,8 @@
+# Local Claude Code settings (personal; don't publish)
+.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# See ios/.gitignore for iOS build artifacts

@@ -1,0 +1,42 @@
+# XcodeGen spec. The .xcodeproj is generated on the CI runner (and locally) with
+#   xcodegen generate
+# so we never commit the fragile, merge-hostile .xcodeproj. Authoring the app as
+# plain text (this file + Swift sources) means it can be edited from Windows/Linux;
+# only the macOS CI runner needs Xcode to compile it.
+name: IpadDisplay
+options:
+  bundleIdPrefix: com.aidanorsino
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+targets:
+  IpadDisplay:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aidanorsino.ipaddisplay
+        MARKETING_VERSION: "0.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "2"        # iPad only
+        SWIFT_VERSION: "5.0"
+        # Sideloadly re-signs with your Apple ID at install time, so CI builds unsigned.
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: ipaddisplay
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIRequiredDeviceCapabilities: [metal]
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
