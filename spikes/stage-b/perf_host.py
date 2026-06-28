@@ -131,6 +131,7 @@ def main() -> int:
 
     print("Starting usbmux forward 7000->7000 and connecting to the app...")
     proc, sock = start_forward()
+    sock.settimeout(120)   # reset the 1s connect timeout; transfers take seconds
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     print("Connected to iPad PerfServer.\n")
 
