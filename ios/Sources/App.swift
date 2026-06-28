@@ -1,11 +1,14 @@
 import SwiftUI
 import UIKit
 
-// M0: the app is the iPad link endpoint. It listens on TCP :7000 and speaks the
-// canonical ipaddisplay wire protocol (24-byte little-endian MsgHeader + payload).
-// The Windows host (host/handshake_host.py) drives the handshake over usbmux.
-// This screen shows the handshake state + the negotiated stream config.
-// Next step after this: VideoToolbox/Metal frame receiver (M3+).
+// The iPad link endpoint. It listens on TCP :7000 and speaks the canonical
+// ipaddisplay wire protocol (24-byte little-endian MsgHeader + payload). The
+// Windows host (host/handshake_host.py, then host/stream_host.py) drives the
+// handshake + the live H.264 stream over usbmux.
+//
+// M5/M6: once decoded frames start flowing the UI swaps the handshake status
+// screen for a full-screen MetalDisplayView (the decoder's VideoFrameSink). When
+// the client disconnects it falls back to the status screen.
 @main
 struct IpadDisplayApp: App {
     var body: some Scene {
@@ -15,12 +18,40 @@ struct IpadDisplayApp: App {
     }
 }
 
+/// Owns the single MetalDisplayView instance for the app's lifetime. As a
+/// @StateObject this is created exactly once (SwiftUI never re-runs the
+/// autoclosure), so we never spin up a second Metal device / display link.
+final class DisplayHolder: ObservableObject {
+    let view = MetalDisplayView(frame: .zero)
+}
+
 struct ContentView: View {
     @StateObject private var server = LinkServer()
+    @StateObject private var display = DisplayHolder()
 
     var body: some View {
+        ZStack {
+            Color.black
+            if server.isStreaming {
+                MetalDisplayRepresentable(view: display.view)
+            } else {
+                handshakeStatus
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
+        .statusBarHidden(true)
+        .onAppear {
+            UIApplication.shared.isIdleTimerDisabled = true   // don't sleep mid-session
+            server.frameSink = display.view                   // decoder -> renderer hand-off
+            server.start()
+        }
+    }
+
+    // The pre-stream handshake / status screen (unchanged from M0 aside from label).
+    private var handshakeStatus: some View {
         VStack(spacing: 18) {
-            Text("ipaddisplay · M0")
+            Text("ipaddisplay · M5")
                 .font(.system(size: 44, weight: .bold, design: .rounded))
 
             Text(server.phase.rawValue)
@@ -45,6 +76,9 @@ struct ContentView: View {
                     GridRow { Text("config").gridColumnAlignment(.trailing); Text("— not negotiated —") }
                 }
                 GridRow { Text("pings").gridColumnAlignment(.trailing); Text("\(server.pings)") }
+                if server.framesDecoded > 0 {
+                    GridRow { Text("frames").gridColumnAlignment(.trailing); Text("\(server.framesDecoded)") }
+                }
                 if server.stubbed > 0 {
                     GridRow { Text("stubbed msgs").gridColumnAlignment(.trailing); Text("\(server.stubbed)") }
                 }
@@ -52,7 +86,7 @@ struct ContentView: View {
             .font(.title3.monospaced())
             .padding(.top, 8)
 
-            Text("Keep this screen on. Run host/handshake_host.py on the host.")
+            Text("Keep this screen on. Run host/stream_host.py on the host.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.top, 8)
@@ -61,9 +95,5 @@ struct ContentView: View {
         .background(Color(white: 0.07))
         .foregroundStyle(.white)
         .ignoresSafeArea()
-        .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true   // don't sleep mid-session
-            server.start()
-        }
     }
 }

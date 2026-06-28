@@ -108,7 +108,7 @@ typedef struct IpdpStreamConfig {
     uint8_t  chroma;         /* offset 6  : 0=420 */
     uint8_t  bitDepth;       /* offset 7  : 8 */
     uint8_t  fullRange;      /* offset 8  : 1 */
-    uint8_t  colorPrimaries; /* offset 9  : 12=P3-D65 */
+    uint8_t  colorPrimaries; /* offset 9  : 1=BT.709 (RECONCILED from 12; stream is 709/sRGB) */
     uint8_t  transfer;       /* offset 10 : 13=sRGB */
     uint8_t  matrix;         /* offset 11 : 1=BT.709 */
 } IpdpStreamConfig;

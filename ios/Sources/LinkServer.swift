@@ -1,6 +1,7 @@
 import Foundation
 import Combine   // ObservableObject / @Published live here
 import Darwin
+import CoreMedia // CMTime (DecodedFrame.pts) bridging for the renderer hand-off
 
 // M0: the iPad link listener. A BSD-socket TCP server on 0.0.0.0:7000 that the
 // Windows host drives over usbmux. It speaks the canonical ipaddisplay wire
@@ -12,8 +13,11 @@ import Darwin
 //   STREAM_CONFIG  (H->D) -> store + reply STREAM_CONFIG_ACK{ok=1}
 //   PING           (both) -> reply PONG echoing the payload
 //   TEARDOWN       (both) -> close the connection
-// Video / still / set-layer types are recognised and counted but stubbed; their
-// payloads are drained and ignored (deferred to M3+).
+//
+// M5 adds live video: VIDEO_PARAM_SETS (0x10) and VIDEO_FRAME (0x11) are parsed
+// and driven into a VideoDecoder, whose decoded NV12 CVPixelBuffers are handed to
+// the renderer (a VideoFrameSink, the MetalDisplayView) for M6 display.
+// SET_LAYER / STILL_* (M7/M8) remain recognised, counted, and drained.
 
 // MARK: - Wire protocol constants
 
@@ -85,7 +89,7 @@ final class LinkServer: ObservableObject {
         var codecName: String { codec == 0 ? "H.264" : "HEVC" }
         var chromaName: String { chroma == 0 ? "4:2:0" : "\(chroma)" }
         var rangeName: String { fullRange == 1 ? "full" : "video" }
-        // 12=P3-D65, 13=sRGB transfer, 1=BT.709 matrix per the spec.
+        // Reconciled M5 contract: 1=BT.709 primaries, 13=sRGB transfer, 1=BT.709 matrix.
         var colorName: String { "prim=\(colorPrimaries) transfer=\(transfer) matrix=\(matrix)" }
         var resolution: String { "\(width)×\(height)" }
     }
@@ -94,12 +98,31 @@ final class LinkServer: ObservableObject {
     @Published var detail: String = ""
     @Published var config: NegotiatedConfig? = nil
     @Published var pings: UInt64 = 0
-    @Published var stubbed: UInt64 = 0   // count of video/still/set-layer messages dropped
+    @Published var stubbed: UInt64 = 0   // count of set-layer/still messages dropped (video is live in M5)
+    @Published var isStreaming: Bool = false   // true once decoded frames are flowing
+    @Published var framesDecoded: UInt64 = 0
 
+    /// The renderer sink (a MetalDisplayView). Set by the UI before `start()`.
+    /// Held weakly: SwiftUI owns the view's lifetime.
+    weak var frameSink: VideoFrameSink?
+
+    private let decoder = VideoDecoder()
     private let port: UInt16
     private let queue = DispatchQueue(label: "linkserver", qos: .userInitiated)
 
-    init(port: UInt16 = 7000) { self.port = port }
+    init(port: UInt16 = 7000) {
+        self.port = port
+        // Bridge decoded NV12 frames to the renderer. Fires on a VideoToolbox queue;
+        // MetalDisplayView.present(_:) is thread-safe (it latches under a lock).
+        decoder.onDecodedFrame = { [weak self] frame in
+            guard let self else { return }
+            // DecodedFrame.pts was built as CMTime(value: Int64(bitPattern: timestampUs),
+            // timescale: 1_000_000); recover the original microsecond stamp exactly.
+            let ts = UInt64(bitPattern: frame.pts.value)
+            self.frameSink?.present(VideoFrame(pixelBuffer: frame.pixelBuffer, timestampUs: ts))
+            self.markFrameDecoded()
+        }
+    }
 
     func start() { queue.async { [weak self] in self?.runServer() } }
 
@@ -116,6 +139,15 @@ final class LinkServer: ObservableObject {
     }
     private func bumpStubbed() {
         DispatchQueue.main.async { self.stubbed &+= 1 }
+    }
+    private func markFrameDecoded() {
+        DispatchQueue.main.async {
+            self.framesDecoded &+= 1
+            if !self.isStreaming { self.isStreaming = true }
+        }
+    }
+    private func endStreaming() {
+        DispatchQueue.main.async { self.isStreaming = false }
     }
 
     // MARK: Listener
@@ -147,6 +179,8 @@ final class LinkServer: ObservableObject {
             setsockopt(cfd, Int32(IPPROTO_TCP), TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
             set(.connected)
             handleClient(cfd)
+            decoder.reset()      // drop session; host resends param sets + IDR on reconnect
+            endStreaming()
             close(cfd)
             set(.disconnected, "listening on :\(port)")
         }
@@ -312,6 +346,31 @@ final class LinkServer: ObservableObject {
         )
     }
 
+    // MARK: VIDEO_PARAM_SETS parsing
+
+    // VIDEO_PARAM_SETS payload: u8 count, then `count` records of
+    // [u16 BIG-ENDIAN nalLen][nalLen raw NAL bytes] (no start code). The u16
+    // length prefixes are big-endian (AVCC/network order) — the one deliberate
+    // exception to the otherwise little-endian wire (see protocol.md). Returns the
+    // raw SPS/PPS NALs (SPS first) for VideoDecoder.setParameterSets, or nil on a
+    // truncated/inconsistent payload.
+    private func parseParamSets(_ p: [UInt8]) -> [[UInt8]]? {
+        guard p.count >= 1 else { return nil }
+        let count = Int(p[0])
+        var idx = 1
+        var sets: [[UInt8]] = []
+        sets.reserveCapacity(count)
+        for _ in 0..<count {
+            guard idx + 2 <= p.count else { return nil }
+            let len = (Int(p[idx]) << 8) | Int(p[idx + 1])   // BIG-ENDIAN
+            idx += 2
+            guard len > 0, idx + len <= p.count else { return nil }
+            sets.append(Array(p[idx..<idx + len]))
+            idx += len
+        }
+        return sets.isEmpty ? nil : sets
+    }
+
     // MARK: Dispatch loop
 
     private func handleClient(_ fd: Int32) {
@@ -358,9 +417,28 @@ final class LinkServer: ObservableObject {
                 _ = readPayload(fd, length)
                 return
 
-            case .videoParamSets, .videoFrame, .setLayer,
-                 .stillBegin, .stillTile, .stillCommit:
-                // M3+ types: drain payload, count it, keep the link alive.
+            case .videoParamSets:
+                // u8 count, then count * (u16 BE nalLen + nalLen raw bytes); SPS then PPS.
+                guard let payload = readPayload(fd, length) else { return }
+                if let sets = parseParamSets(payload) {
+                    decoder.setParameterSets(sets)
+                } else {
+                    NSLog("[LinkServer] malformed VIDEO_PARAM_SETS (\(payload.count) bytes)")
+                }
+
+            case .videoFrame:
+                // Payload IS a ready-to-decode AVCC access unit (u32 BE length prefixes);
+                // hand it to the decoder verbatim. flags bit0=IDR; pts from the header.
+                guard let payload = readPayload(fd, length) else { return }
+                decoder.decode(au: payload, flags: hdr.flags, timestampUs: hdr.timestampUs)
+                // M5 cannot ask the host for a forced IDR (it force-sends one on connect);
+                // only log if we are still keyframe-starved after feeding a non-IDR AU.
+                if (hdr.flags & 0x01) == 0 && decoder.needsKeyframe {
+                    NSLog("[LinkServer] decoder awaiting IDR; dropping until keyframe")
+                }
+
+            case .setLayer, .stillBegin, .stillTile, .stillCommit:
+                // M7/M8 types: drain payload, count it, keep the link alive.
                 if !drain(fd, length) { return }
                 bumpStubbed()
 

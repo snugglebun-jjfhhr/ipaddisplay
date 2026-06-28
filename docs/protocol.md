@@ -45,15 +45,16 @@ Python struct: `"<BBHIIIQ"` (calcsize == 24).
 | 0x07 | PONG | both | echo of the PING payload |
 | 0x08 | FRAME_PRESENTED | D→H | (M9) |
 | 0x09 | ERROR | both | (later) |
-| 0x10 | VIDEO_PARAM_SETS | H→D | (M5) |
-| 0x11 | VIDEO_FRAME | H→D | (M5) |
+| 0x10 | VIDEO_PARAM_SETS | H→D | 1 + Σ(2 + nalLen) |
+| 0x11 | VIDEO_FRAME | H→D | Σ(4 + nalLen) (one AVCC access unit) |
 | 0x20 | SET_LAYER | H→D | (M8) |
 | 0x21 | STILL_BEGIN | H→D | (M8) |
 | 0x22 | STILL_TILE | H→D | (M8) |
 | 0x23 | STILL_COMMIT | H→D | (M8) |
 
-Only the rows with a concrete byte count below are implemented in M0-M2; the
-rest are reserved codes (stubbed in the Swift dispatch).
+Rows with a concrete byte count are implemented in M0-M2 (handshake) and M5
+(VIDEO_PARAM_SETS, VIDEO_FRAME); the rest are reserved codes (stubbed in the
+Swift dispatch).
 
 ## HELLO (H→D) — 16 bytes
 
@@ -94,11 +95,21 @@ Python struct: `"<HHHHIBBBB"`.
 | 6  | 1 | u8  | `chroma`         | 0 = 4:2:0 |
 | 7  | 1 | u8  | `bitDepth`       | 8 |
 | 8  | 1 | u8  | `fullRange`      | 1 |
-| 9  | 1 | u8  | `colorPrimaries` | 12 = P3-D65 |
-| 10 | 1 | u8  | `transfer`       | 13 = sRGB |
+| 9  | 1 | u8  | `colorPrimaries` | **1 = BT.709** (reconciled, see note) |
+| 10 | 1 | u8  | `transfer`       | 13 = sRGB / iec61966-2-1 |
 | 11 | 1 | u8  | `matrix`         | 1 = BT.709 |
 
 Python struct: `"<HHBBBBBBBB"`.
+
+**M5 reconciliation — `colorPrimaries` is 1 (BT.709), not 12 (P3-D65).** The live
+M3/M4 NVENC stream signals VUI `colour_primaries=1`, `transfer_characteristics=13`,
+`matrix_coefficients=1`, `video_full_range_flag=1`. The original M0/M2 handshake
+test wrongly sent `12`; the wire now matches the bitstream. The host **MUST** send
+`colorPrimaries=1, transfer=13, matrix=1, fullRange=1, codec=0, chroma=0, bitDepth=8`.
+The iPad still **color-manages** the BT.709/sRGB signal onto the Display-P3 panel at
+render time (it sets `CAMetalLayer.colorspace` to sRGB and writes `.bgra8Unorm` so
+Core Animation converts sRGB→P3) — the panel is P3 even though the signalled
+primaries are 709. Do **not** tag the layer Display-P3 while writing sRGB values.
 
 ## STREAM_CONFIG_ACK (D→H) — 2 bytes
 
@@ -108,6 +119,64 @@ Python struct: `"<HHBBBBBBBB"`.
 | 1 | 1 | u8 | `reason` | 0 on ok; error code on reject |
 
 Python struct: `"<BB"`.
+
+## M5 video messages — NAL length endianness
+
+The MsgHeader and every handshake struct above are **little-endian**. The video
+messages below are the one **documented exception**: their per-NAL **length
+prefixes are big-endian (network byte order)**, following the ISO-14496-15 AVCC /
+`avcC` convention. This lets the iPad wrap a `VIDEO_FRAME` payload directly in a
+`CMBlockBuffer` and decode it with `nalUnitHeaderLength = 4` **without rewriting
+any bytes**. The payload is an opaque CoreMedia container, not a packed struct.
+
+ffmpeg/NVENC emit **Annex-B** (start codes `00 00 01` / `00 00 00 01` between
+NALs, AUD type-9 present, in-band SPS/PPS repeated). The **host** converts
+Annex-B → AVCC and extracts SPS/PPS; the iPad never scans for AU boundaries
+across socket reads — it receives whole access units.
+
+H.264 NAL types used: `5` = IDR slice, `7` = SPS, `8` = PPS, `9` = AUD.
+
+## VIDEO_PARAM_SETS (H→D) — `1 + Σ(2 + nalLen)` bytes
+
+| Offset | Size | Type | Field | Notes |
+|-------:|-----:|------|-------|-------|
+| 0 | 1 | u8 | `count` | number of parameter-set NALs |
+| 1 | … | — | NAL records | `count` repetitions of the record below |
+
+Per-NAL record (repeated `count` times), **SPS (type 7) first, then PPS (type 8)**:
+
+| Size | Type | Field | Notes |
+|-----:|------|-------|-------|
+| 2 | u16 (**big-endian**) | `nalLen` | length of the raw NAL |
+| `nalLen` | bytes | `nal` | raw NAL bytes, **no start code, no Annex-B prefix** |
+
+iPad: feed these directly to `CMVideoFormatDescriptionCreateFromH264ParameterSets`
+(`nalUnitHeaderLength: 4`). Sent on first connect and on any param-set change; the
+host resends param sets + an IDR on every (re)connect.
+
+## VIDEO_FRAME (H→D) — `Σ(4 + nalLen)` bytes
+
+Payload is exactly one access unit in **AVCC** form: a back-to-back sequence of
+NAL records covering the whole AU (AUD/SEI/SPS/PPS/slice NALs as present).
+
+Per-NAL record (repeated to fill the payload):
+
+| Size | Type | Field | Notes |
+|-----:|------|-------|-------|
+| 4 | u32 (**big-endian**) | `nalLen` | length of the raw NAL |
+| `nalLen` | bytes | `nal` | raw NAL bytes, no start code |
+
+`MsgHeader.flags` bitfield for VIDEO_FRAME:
+
+| Bit | Mask | Name | Meaning |
+|----:|-----:|------|---------|
+| 0 | 0x01 | `IDR` | AU contains an IDR slice (NAL type 5) — keyframe |
+| 1 | 0x02 | `paramSetsPrecede` | AU carries in-band SPS/PPS |
+| 2 | 0x04 | `discardable` | AU is non-reference / droppable (unused: I/P-only) |
+
+iPad: the payload bytes are a ready-to-decode AVCC access unit — wrap in a
+`CMBlockBuffer`, pair with the param-set format description, and submit to the
+`VTDecompressionSession`. No NAL scanning required.
 
 ## PING / PONG (both) — 0..N bytes
 
@@ -123,8 +192,8 @@ host connects (usbmux fd to iPad :7000)
         ▼
 host ── HELLO ──────────────► device
 device ── DEVICE_INFO ──────► host
-host picks config (2732x2048, H264, 4:2:0, 8-bit,
-                   fullRange=1, primaries=12, transfer=13, matrix=1)
+host picks config (H264, 4:2:0, 8-bit,
+                   fullRange=1, primaries=1, transfer=13, matrix=1)
 host ── STREAM_CONFIG ──────► device
 device ── STREAM_CONFIG_ACK{ok=1} ► host
         │
@@ -132,6 +201,7 @@ device ── STREAM_CONFIG_ACK{ok=1} ► host
    keepalive loop:  host ── PING ──► device ── PONG ──► host
 ```
 
-For the full pipeline (M3+) the host MUST, after `STREAM_CONFIG_ACK{ok}`, send
+For the full pipeline (M5+) the host MUST, after `STREAM_CONFIG_ACK{ok}`, send
 `VIDEO_PARAM_SETS` then a `VIDEO_FRAME(IDR)` first, and resend param sets + IDR
-on every (re)connect. Those messages are out of scope for this M0-M2 contract.
+on every (re)connect. See the M5 video message sections above for their byte
+layouts.

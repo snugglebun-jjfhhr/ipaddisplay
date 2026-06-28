@@ -18,7 +18,7 @@ FSM:
   connect
     -> HELLO            (H->D)  codecMask = H264 | HEVC
     -> DEVICE_INFO      (D->H)  print native res + capabilities
-    -> STREAM_CONFIG    (H->D)  2732x2048 H264 420 8 fullRange prim12 transfer13 matrix1
+    -> STREAM_CONFIG    (H->D)  2732x2048 H264 420 8 fullRange prim1 transfer13 matrix1
     -> STREAM_CONFIG_ACK(D->H)  assert ok == 1
     -> 20x PING/PONG    keepalive, measure RTT
 
@@ -192,7 +192,7 @@ def main() -> int:
             chroma=p.CHROMA_420,
             bit_depth=8,
             full_range=1,
-            color_primaries=12,  # P3-D65
+            color_primaries=1,   # BT.709 (RECONCILED from 12; stream is 709/sRGB)
             transfer=13,         # sRGB
             matrix=1,            # BT.709
         )
