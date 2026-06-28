@@ -6,3 +6,7 @@
 *.swp
 
 # See ios/.gitignore for iOS build artifacts
+
+# python
+__pycache__/
+*.pyc

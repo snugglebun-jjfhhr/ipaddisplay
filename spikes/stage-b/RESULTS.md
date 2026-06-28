@@ -33,3 +33,35 @@ becomes ~0.5s again instead of ~0.1s).
 
 Sub-millisecond round trip on a real socket, matching the AFC proxy. Transport
 latency contributes nothing to the frame budget.
+
+---
+
+## Transport investigation follow-up (2026-06-28) — host->device is inconclusive in Python
+
+Tried to resolve the 272 Mbps host->device number with two more Python paths:
+
+| path | host->device | result |
+|------|-------------:|--------|
+| `pymobiledevice3 usbmux forward` (relay) | 272 Mbps | works |
+| direct `MuxDevice.connect()` + one big write | **stalled** | timed out at 32 MiB and 256 MiB |
+| AFC service (spike #1) | 1252 Mbps | different channel type |
+
+Three paths, three answers. Conclusion: **pymobiledevice3's pure-Python stack has
+path-specific quirks in the host->device direction; none is authoritative for what
+the PRODUCTION client will achieve.** The direct-connect stall is almost certainly a
+library/flow-control quirk (production won't use pymobiledevice3). The definitive
+test is a **C libusbmuxd client** (or `iproxy`, which is libusbmuxd-based), which is
+also what production uses. That test (`perf_host_iproxy.py` + an `iproxy 7000 7000`)
+requires installing the libimobiledevice Windows binaries; deferred as an
+optimization gate, NOT a blocker.
+
+### Design decision: plan conservatively for ~272 Mbps host->device
+
+- **Motion path (H.264 60Hz):** needs ~50-200 Mbps. Fine at 272. No impact.
+- **Lossless full-frame still:** 16.8 MB = 134 Mbit -> ~0.5 s at 272 Mbps (NOT the
+  ~0.1 s that the AFC 1252 figure suggested). 
+- **Mitigation:** the lossless path must lean on **dirty-rect tiles** (send only
+  changed regions). A full-frame lossless refresh (~0.5 s) happens only on a scene
+  change; incremental edits refresh fast. Acceptable for photo work.
+- If the C-client test later shows host->device ~1 Gbps, full-frame stills drop to
+  ~0.1 s — treat that as upside, not a dependency.
