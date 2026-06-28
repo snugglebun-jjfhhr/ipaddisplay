@@ -263,8 +263,8 @@ final class DisplayRenderer {
 
         var is601 = false
         if let raw = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, nil) {
-            let value = raw.takeRetainedValue()
-            if let s = value as? String {
+            // CVBufferCopyAttachment returns a managed CFTypeRef? (not Unmanaged).
+            if let s = raw as? String {
                 is601 = (s == (kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String))
             }
         }
