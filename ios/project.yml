@@ -40,3 +40,14 @@ targets:
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown
+
+# Explicit scheme so xcodebuild -scheme always resolves (required with -derivedDataPath).
+schemes:
+  IpadDisplay:
+    build:
+      targets:
+        IpadDisplay: all
+    run:
+      config: Release
+    archive:
+      config: Release

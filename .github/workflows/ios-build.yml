@@ -32,7 +32,7 @@ jobs:
           set -o pipefail
           xcodebuild \
             -project IpadDisplay.xcodeproj \
-            -target IpadDisplay \
+            -scheme IpadDisplay \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
