@@ -26,8 +26,8 @@ final class MetalDisplayView: UIView, VideoFrameSink {
     private let renderer: DisplayRenderer?
     private var displayLink: CADisplayLink?
 
-    /// DIAGNOSTIC: called on the main thread after each actual draw attempt.
-    var onRendered: (() -> Void)?
+    /// DIAGNOSTIC: render result code per tick (1=drew,2=no size,3=texture nil,4=no drawable).
+    var onRenderResult: ((Int) -> Void)?
 
     // Latest frame state, guarded by `lock`. The display link consumes the
     // pending frame on the main thread; producers set it from decode threads.
@@ -133,13 +133,19 @@ final class MetalDisplayView: UIView, VideoFrameSink {
         lock.unlock()
 
         guard let renderer else { return }
+        var code = 0
         switch mode {
         case .motion:
-            if let motion { renderer.render(motion, to: metalLayer) }
+            if let motion { code = renderer.render(motion, to: metalLayer) }
         case .still:
-            if let still { renderer.render(still: still, to: metalLayer) }
+            if let still { renderer.render(still: still, to: metalLayer); code = 1 }
         }
-        onRendered?()   // DIAGNOSTIC: a draw was attempted this tick
+        // If the draw failed (no drawable / texture), keep the frame pending so the
+        // next tick retries instead of dropping it.
+        if code != 1 {
+            lock.lock(); needsDisplay = true; lock.unlock()
+        }
+        onRenderResult?(code)
     }
 }
 

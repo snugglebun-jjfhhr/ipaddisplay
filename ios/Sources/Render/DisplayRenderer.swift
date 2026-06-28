@@ -114,11 +114,12 @@ final class DisplayRenderer {
 
     // MARK: Motion
 
-    /// Render one NV12 frame into `layer`'s next drawable, letterboxed to its
-    /// display aspect. No-op if the layer has no backing area yet.
-    func render(_ frame: VideoFrame, to layer: CAMetalLayer) {
+    /// Render result codes (diagnostic): 1=drew, 2=no size, 3=texture nil, 4=no drawable.
+    @discardableResult
+    func render(_ frame: VideoFrame, to layer: CAMetalLayer) -> Int {
+      return autoreleasepool { () -> Int in
         let drawableSize = layer.drawableSize
-        guard drawableSize.width >= 1, drawableSize.height >= 1 else { return }
+        guard drawableSize.width >= 1, drawableSize.height >= 1 else { return 2 }
 
         let pb = frame.pixelBuffer
 
@@ -126,9 +127,9 @@ final class DisplayRenderer {
         guard let lumaCV = makeTexture(from: pb, plane: 0, format: .r8Unorm),
               let chromaCV = makeTexture(from: pb, plane: 1, format: .rg8Unorm),
               let luma = CVMetalTextureGetTexture(lumaCV),
-              let chroma = CVMetalTextureGetTexture(chromaCV) else { return }
+              let chroma = CVMetalTextureGetTexture(chromaCV) else { return 3 }
 
-        guard let drawable = layer.nextDrawable() else { return }
+        guard let drawable = layer.nextDrawable() else { return 4 }
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
@@ -167,6 +168,8 @@ final class DisplayRenderer {
         // The current frame's wrappers (lumaCV/chromaCV) and source buffer stay
         // alive via the completion handler above until the GPU finishes reading.
         CVMetalTextureCacheFlush(textureCache, 0)
+        return 1
+      }
     }
 
     // MARK: Still (M8) — bit-exact 1:1 blit into the drawable

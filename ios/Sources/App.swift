@@ -38,8 +38,8 @@ struct ContentView: View {
                     // DIAGNOSTIC overlay: live decoded-frame count. If this climbs
                     // while the picture is frozen -> decoder OK, renderer stuck.
                     // If it stays at 1 -> decoder stuck. (Temporary, M5 debug.)
-                    Text("dec \(server.framesDecoded)  pres \(server.framesPresented)  rend \(server.framesRendered)")
-                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    Text("dec \(server.framesDecoded) pres \(server.framesPresented)\ndrew \(server.drew) texFail \(server.texFail) noDrw \(server.noDrawable)")
+                        .font(.system(size: 20, weight: .bold, design: .monospaced))
                         .foregroundStyle(.green)
                         .padding(8)
                         .background(Color.black.opacity(0.6))
@@ -55,7 +55,7 @@ struct ContentView: View {
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true   // don't sleep mid-session
             server.frameSink = display.view                   // decoder -> renderer hand-off
-            display.view.onRendered = { [weak server] in server?.bumpRendered() }  // DIAGNOSTIC
+            display.view.onRenderResult = { [weak server] c in server?.reportRender(c) }  // DIAGNOSTIC
             server.start()
         }
     }

@@ -102,7 +102,9 @@ final class LinkServer: ObservableObject {
     @Published var isStreaming: Bool = false   // true once decoded frames are flowing
     @Published var framesDecoded: UInt64 = 0
     @Published var framesPresented: UInt64 = 0  // present() calls that actually hit a non-nil sink
-    @Published var framesRendered: UInt64 = 0   // actual renderTick draws (set by the view)
+    @Published var drew: UInt64 = 0             // render committed a draw (code 1)
+    @Published var noDrawable: UInt64 = 0       // nextDrawable() returned nil (code 4)
+    @Published var texFail: UInt64 = 0          // makeTexture returned nil (code 3)
 
     /// The renderer sink (a MetalDisplayView). Set by the UI before `start()`.
     /// Held weakly: SwiftUI owns the view's lifetime.
@@ -154,9 +156,14 @@ final class LinkServer: ObservableObject {
     private func bumpPresented() {
         DispatchQueue.main.async { self.framesPresented &+= 1 }
     }
-    /// Called by the view from its render tick (main thread).
-    func bumpRendered() {
-        self.framesRendered &+= 1
+    /// Called by the view from its render tick (main thread) with the render code.
+    func reportRender(_ code: Int) {
+        switch code {
+        case 1: drew &+= 1
+        case 3: texFail &+= 1
+        case 4: noDrawable &+= 1
+        default: break
+        }
     }
     private func endStreaming() {
         DispatchQueue.main.async { self.isStreaming = false }
