@@ -15,9 +15,12 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15   # Xcode 16+, reads the project format XcodeGen emits
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
