@@ -33,7 +33,18 @@ struct ContentView: View {
         ZStack {
             Color.black
             if server.isStreaming {
-                MetalDisplayRepresentable(view: display.view)
+                ZStack(alignment: .topLeading) {
+                    MetalDisplayRepresentable(view: display.view)
+                    // DIAGNOSTIC overlay: live decoded-frame count. If this climbs
+                    // while the picture is frozen -> decoder OK, renderer stuck.
+                    // If it stays at 1 -> decoder stuck. (Temporary, M5 debug.)
+                    Text("dec \(server.framesDecoded)")
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.green)
+                        .padding(8)
+                        .background(Color.black.opacity(0.6))
+                        .padding()
+                }
             } else {
                 handshakeStatus
             }
