@@ -26,6 +26,9 @@ final class MetalDisplayView: UIView, VideoFrameSink {
     private let renderer: DisplayRenderer?
     private var displayLink: CADisplayLink?
 
+    /// DIAGNOSTIC: called on the main thread after each actual draw attempt.
+    var onRendered: (() -> Void)?
+
     // Latest frame state, guarded by `lock`. The display link consumes the
     // pending frame on the main thread; producers set it from decode threads.
     private let lock = NSLock()
@@ -136,6 +139,7 @@ final class MetalDisplayView: UIView, VideoFrameSink {
         case .still:
             if let still { renderer.render(still: still, to: metalLayer) }
         }
+        onRendered?()   // DIAGNOSTIC: a draw was attempted this tick
     }
 }
 

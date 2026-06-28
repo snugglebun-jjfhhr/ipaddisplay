@@ -101,6 +101,8 @@ final class LinkServer: ObservableObject {
     @Published var stubbed: UInt64 = 0   // count of set-layer/still messages dropped (video is live in M5)
     @Published var isStreaming: Bool = false   // true once decoded frames are flowing
     @Published var framesDecoded: UInt64 = 0
+    @Published var framesPresented: UInt64 = 0  // present() calls that actually hit a non-nil sink
+    @Published var framesRendered: UInt64 = 0   // actual renderTick draws (set by the view)
 
     /// The renderer sink (a MetalDisplayView). Set by the UI before `start()`.
     /// Held weakly: SwiftUI owns the view's lifetime.
@@ -119,7 +121,10 @@ final class LinkServer: ObservableObject {
             // DecodedFrame.pts was built as CMTime(value: Int64(bitPattern: timestampUs),
             // timescale: 1_000_000); recover the original microsecond stamp exactly.
             let ts = UInt64(bitPattern: frame.pts.value)
-            self.frameSink?.present(VideoFrame(pixelBuffer: frame.pixelBuffer, timestampUs: ts))
+            if let sink = self.frameSink {
+                sink.present(VideoFrame(pixelBuffer: frame.pixelBuffer, timestampUs: ts))
+                self.bumpPresented()
+            }
             self.markFrameDecoded()
         }
     }
@@ -145,6 +150,13 @@ final class LinkServer: ObservableObject {
             self.framesDecoded &+= 1
             if !self.isStreaming { self.isStreaming = true }
         }
+    }
+    private func bumpPresented() {
+        DispatchQueue.main.async { self.framesPresented &+= 1 }
+    }
+    /// Called by the view from its render tick (main thread).
+    func bumpRendered() {
+        self.framesRendered &+= 1
     }
     private func endStreaming() {
         DispatchQueue.main.async { self.isStreaming = false }
