@@ -104,23 +104,21 @@ class AccessUnitParser:
 
 
 def build_ffmpeg_args(ffmpeg: str, fps: int, bitrate: str, output_idx: int,
-                      draw_mouse: int) -> list[str]:
+                      draw_mouse: int, test: bool = False) -> list[str]:
     """Mirror capture_encode.ps1's PRIMARY ddagrab->NVENC path, but stream the
     Annex-B elementary stream to stdout (`-f h264 pipe:1`). Keep the exact color
-    convert + VUI tag pair so the 601-vs-709 / PC-vs-TV trap cannot occur."""
+    convert + VUI tag pair so the 601-vs-709 / PC-vs-TV trap cannot occur.
+
+    test=True swaps the desktop capture for a guaranteed-moving testsrc2 pattern
+    (a diagnostic to separate capture-content issues from the iPad display path)."""
     scale_csc = ("scale=in_range=full:out_range=full:out_color_matrix=bt709:"
                  "flags=full_chroma_int+accurate_rnd,format=nv12")
     setparams = ("setparams=range=pc:color_primaries=bt709:"
                  "color_trc=iec61966-2-1:colorspace=bt709")
-    fc = (f"ddagrab=output_idx={output_idx}:framerate={fps}:draw_mouse={draw_mouse},"
-          f"hwdownload,format=bgra,{scale_csc},{setparams}")
     # ~1-frame VBV, matching the .ps1 computation: bitrate(Mbit) * 1000 / fps.
     bitrate_mbit = float(bitrate.rstrip("Mm"))
     vbv = f"{round(bitrate_mbit * 1000 / fps)}k"
-    return [
-        ffmpeg, "-hide_banner", "-loglevel", "error",
-        "-init_hw_device", "d3d11va",
-        "-filter_complex", fc,
+    enc = [
         "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ull",
         "-profile:v", "high", "-level", "auto", "-aud", "1",
         "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", vbv,
@@ -128,6 +126,17 @@ def build_ffmpeg_args(ffmpeg: str, fps: int, bitrate: str, output_idx: int,
         "-zerolatency", "1", "-rc-lookahead", "0",
         "-f", "h264", "pipe:1",
     ]
+    if test:
+        # Synthetic moving pattern (CPU lavfi source) -> same CSC/VUI -> NVENC.
+        vf = f"{scale_csc},{setparams}"
+        return [ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate={fps}",
+                "-vf", vf] + enc
+    fc = (f"ddagrab=output_idx={output_idx}:framerate={fps}:draw_mouse={draw_mouse},"
+          f"hwdownload,format=bgra,{scale_csc},{setparams}")
+    return [ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-init_hw_device", "d3d11va",
+            "-filter_complex", fc] + enc
 
 
 def spawn_ffmpeg(args: list[str]) -> subprocess.Popen:
@@ -318,6 +327,8 @@ def main() -> int:
                     help="STREAM_CONFIG width (advisory; default 1920)")
     ap.add_argument("--height", type=int, default=1080,
                     help="STREAM_CONFIG height (advisory; default 1080)")
+    ap.add_argument("--test", action="store_true",
+                    help="diagnostic: stream a moving testsrc2 pattern instead of the desktop")
     args = ap.parse_args()
 
     print("Starting usbmux forward 7000->7000 and connecting to the app...")
@@ -336,7 +347,7 @@ def main() -> int:
         seq = do_handshake(sock, args.width, args.height, args.fps)
 
         ff_args = build_ffmpeg_args(args.ffmpeg, args.fps, args.bitrate,
-                                    args.output_idx, args.draw_mouse)
+                                    args.output_idx, args.draw_mouse, test=args.test)
         print(f"\nspawning ffmpeg:\n  {' '.join(ff_args)}\n")
         proc_ff = spawn_ffmpeg(ff_args)
 
