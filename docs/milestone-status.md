@@ -9,8 +9,8 @@ Tracks docs/mirror-milestone-plan.md §2. Updated as milestones land.
 | M2 | Host skeleton + handshake | ✅ done (Python harness) | acceptance below. Production C++ host deferred to M3 (reuses host/protocol.h). |
 | M3 | Capture (DXGI Desktop Duplication) | ✅ done (FFmpeg ddagrab) | verified live, see below |
 | M4 | Encode (NVENC H.264) | ✅ done (FFmpeg h264_nvenc) | verified live, see below |
-| M5 | Motion path wired end-to-end | ⬜ next | feed the .h264 NAL pump over the protocol |
-| M6 | Metal render (native 2732×2048, P3, 60Hz) | ⬜ | |
+| M5 | Motion path wired end-to-end | ✅ done | live desktop on iPad at 60 fps; acceptance below |
+| M6 | Metal render (P3-managed CAMetalLayer) | ✅ done | renders the live stream; native-res + 120Hz deferred to the virtual-display milestone |
 | M7 | Color-correctness pass (VUI vs CSC) | ⬜ | top risk |
 | M8 | Lossless still path + mode swap | ⬜ | |
 | M9 | Pacing + robustness | ⬜ | |
@@ -63,3 +63,26 @@ color-manages); -level auto (GM204 max) not hard 5.2. Hand-rolled zero-copy C++
 DXGI+NVENC remains the deferred latency optimization.
 
 Note for M5: STREAM_CONFIG must send colorPrimaries=1 (not 12) to match the stream.
+
+## M5 + M6 acceptance (2026-07-02)
+
+`host/stream_host.py` (ffmpeg ddagrab/NVENC -> Python NAL pump -> usbmux :7000)
+against the sideloaded app on iPad13,8: live 1920x1080 desktop mirrored on the
+iPad at a steady 60 fps wire rate (~3 Mbit/s of stripped-AVCC payload for light
+desktop motion), decode -> Metal render confirmed visually smooth ("50-60 fps,
+small lag") with correct colors. On-device counters: dec == pres == drew,
+texFail = 0, noDrw = 0.
+
+**The week-long "frozen/stale image" bug was HOST-side, not iPad-side.** Root
+cause: `protocol._find_start_codes` was a per-byte pure-Python loop and
+`AccessUnitParser.feed` re-scanned (and re-copied) the whole buffer on every
+64 KiB read — quadratic per AU. CBR-padded AUs (~660 KB at fps=15) cost ~0.5 s
+each, throttling the reader below the capture rate; pipe backpressure stalled
+ffmpeg's filter graph, and ddagrab (behind its CFR schedule, dup_frames=true)
+emitted duplicates of a stale cached frame. The wire really carried a frozen
+desktop; the iPad displayed it faithfully. Fixed by making start-code search
+C-speed (`bytes.find`) and the AU parser incremental (scan only new bytes).
+Diagnostics + probes preserved in `spikes/m5-freeze/`.
+
+Deferred out of M5/M6: native 2732x2048 + 120 Hz (needs the virtual display,
+post-M6 milestone); debug overlay removal (kept while M7-M9 land).

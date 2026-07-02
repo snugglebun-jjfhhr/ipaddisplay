@@ -7,9 +7,9 @@ VideoToolbox-decodes → renders to a Metal layer, color-managed to the P3 panel
 Built for photo/video/color editing, so **fidelity beats framerate** (native
 resolution #1, color accuracy #2, refresh rate last — 60 Hz is fine).
 
-> **RESUMING? READ ["CURRENT STATE"](#current-state--the-active-bug) FIRST.** We
-> have first light — video decodes and draws on the iPad — but the picture is
-> **frozen/stale** and we're mid-debug on why.
+> **RESUMING? READ ["CURRENT STATE"](#current-state) FIRST.** The mirror WORKS:
+> live 1080p desktop on the iPad at a steady 60 fps (M5+M6 verified 2026-07-02).
+> Next: M7 color pass. Cleanup owed: on-device debug overlay.
 
 ---
 
@@ -61,7 +61,8 @@ removes that (deferred).
 > the user's projects. This project's repo is the **standalone** one at
 > `/home/aidan/projects/ipaddisplay` (its own `.git`). Never `gh repo create` or
 > commit from the parent. Local git identity: Aidan Orsino / aidan.orsino@gmail.com.
-> Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+> Commit trailer: `Co-Authored-By:` the current Claude model (e.g.
+> `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`).
 
 Common commands (from the WSL repo root):
 ```bash
@@ -119,6 +120,7 @@ ddagrab capture ─ libswscale CSC ─ h264_nvenc        LinkServer :7000 (BSD s
 | `docs/m3-m4-capture-encode.md` | FFmpeg capture/encode command, flag rationale, color note |
 | `spikes/usbmux-throughput/` | Spike #1 (AFC) throughput+latency probes + `RESULTS.md` |
 | `spikes/stage-b/` | Live-socket perf (`perf_host*.py`) + `RESULTS.md` (transport asymmetry) |
+| `spikes/m5-freeze/` | M5 frozen-image root-cause probes + `RESULTS.md` (bisection ladder) |
 | `host/protocol.py` / `protocol.h` | Canonical wire codec (Python + C header) |
 | `host/handshake_host.py` | M2 handshake-only harness |
 | `host/stream_host.py` | **M5 live streamer**: ffmpeg → NAL pump → usbmux. Has `--test` (testsrc2) |
@@ -142,8 +144,8 @@ ddagrab capture ─ libswscale CSC ─ h264_nvenc        LinkServer :7000 (BSD s
 | M2 | Host handshake harness | ✅ done (Python) |
 | M3 | Capture (FFmpeg `ddagrab`) | ✅ done, verified live |
 | M4 | Encode (FFmpeg `h264_nvenc`) | ✅ done, verified live |
-| **M5** | **Host NAL pump + iPad VideoToolbox decode** | ⚠️ **built, first light, but frozen — debugging** |
-| **M6** | **Metal render, color-managed** | ⚠️ **built, draws succeed but image is stale — debugging** |
+| M5 | Host NAL pump + iPad VideoToolbox decode | ✅ done, verified live (60 fps end-to-end) |
+| M6 | Metal render, color-managed | ✅ done, verified live (native-res/120Hz awaits virtual display) |
 | M7 | Color-correctness pass (deltaE test pattern) | ⬜ |
 | M8 | Lossless still path + mode swap | ⬜ |
 | M9 | Pacing (INFLIGHT≤2, FRAME_PRESENTED) + robustness | ⬜ |
@@ -152,7 +154,9 @@ ddagrab capture ─ libswscale CSC ─ h264_nvenc        LinkServer :7000 (BSD s
 ~0.74 ms (socket); **host→device measured only 272 Mbps via the Python relay** —
 suspected Python-forwarder artifact, unresolved; design conservatively for 272
 Mbps host→device (see `spikes/stage-b/RESULTS.md`). M3/M4 stream verified: High
-profile, 4:2:0 8-bit full-range, VUI 1/13/1, decodes clean, I/P only.
+profile, 4:2:0 8-bit full-range, VUI 1/13/1, decodes clean, I/P only. M5 live:
+the socket path sustains 60 msg/s with ease (an early ~18 fps ceiling was the
+pump's Python parser, since fixed — never the transport).
 
 ---
 
@@ -181,68 +185,41 @@ profile, 4:2:0 8-bit full-range, VUI 1/13/1, decodes clean, I/P only.
   `usbmux forward` relays fight over port 7000), and **force-quit + relaunch the iPad
   app** if a connection sticks ("Connection closed by device after 0 of 24 bytes"
   = stale/half-open connection).
+- **THE M5 FREEZE (a week lost — see `spikes/m5-freeze/RESULTS.md`):** a slow pump
+  reader (per-byte Python start-code scan + quadratic buffer re-scan) backpressured
+  ffmpeg's stdout pipe; a stalled graph makes **`ddagrab` emit dups of a stale
+  cached frame** (dup_frames CFR catch-up) — the wire itself carries a frozen
+  desktop while every iPad stage "succeeds". Morals: (1) hot-path byte scanning in
+  Python must use C-speed primitives (`bytes.find`) and scan incrementally; (2) a
+  too-slow CONSUMER shows up as stale CONTENT, not as low fps alone; (3) testsrc2
+  (lavfi) masks stalls — no wall clock, frames just come out late-but-unique;
+  (4) NVENC CBR pads with filler NALs (stripped by `avcc_from_au_for_decode`), so
+  framemd5 "all frames unique" does NOT prove live content — extract PNGs and look.
 
 ---
 
-## CURRENT STATE — the active bug
+## CURRENT STATE
 
-**First light works: the pipeline end-to-end runs.** The handshake completes, the
-host streams live H.264, the iPad decodes it and draws to Metal. **But the on-screen
-image is stale/frozen** — it updates only ~once per minute, even when the Windows
-screen is definitely changing (a scripted cursor wiggle raises the host bitrate
-0.4→2.9 Mbit/s, proving motion reaches the wire).
+**The mirror works end-to-end (2026-07-02):** live 1920×1080 desktop on the iPad,
+steady 60 fps on the wire, visually smooth with only slight lag, colors correct.
+The week-long "frozen image" bug was **host-side**: the pump's Python AU parser was
+too slow, ffmpeg stalled on its stdout pipe, and `ddagrab` emitted dups of a stale
+frame (full story + bisection ladder in `spikes/m5-freeze/RESULTS.md`; fix landed
+in `host/protocol.py` `_find_start_codes` + `host/stream_host.py`
+`AccessUnitParser`, fuzz-tested against the old scanner as oracle). The iPad code
+needed **no changes** — both on-device hypotheses (SwiftUI churn, stale IOSurface
+textures) were disproven by the `--test` bisection.
 
-### What's proven (via an on-device diagnostic overlay — currently in `App.swift`)
-The overlay shows `dec pres drew texFail noDrw`:
-- `dec` (frames decoded, in `onDecodedFrame`), `pres` (present() hit a non-nil
-  sink), `drew` (`render()` returned 1 = committed a draw) **all climb fast + equal**.
-- `texFail = 0` (CVMetalTextureCache create always succeeds) and `noDrw = 0`
-  (`nextDrawable()` always succeeds).
-- **Conclusion: every stage mechanically succeeds per frame** — decode →
-  onDecodedFrame → present → renderTick → render (make textures OK, get drawable OK,
-  draw, `cmd.present`, `commit`, return 1) — yet pixels don't update.
-
-### Ruled out
-Early-return bailouts (counters prove it); clean-aperture and color paths (those are
-**per-frame-constant spatial** transforms — cannot cause a *temporal* freeze; the
-first frame rendered fine).
-
-### Two leading hypotheses (bisect next)
-- **(A) SwiftUI churn:** `@Published` counters (framesDecoded etc.) update ~18×/s,
-  forcing `ContentView.body` to recompute at frame rate, possibly disrupting the
-  Metal view's `CADisplayLink`/drawable presentation. NOTE the freeze existed in the
-  very first M5 build too (where `framesDecoded` was `@Published` and updated 18×/s
-  even though not shown), so this is plausible across all builds. **Test:** stop
-  updating `@Published` at frame rate (throttle to ~1 Hz or make counters plain vars)
-  and/or fully decouple `MetalDisplayView` from the observed object.
-- **(B) Stale texture content:** `CVMetalTextureCacheCreateTextureFromImage` returns
-  a texture bound to a recycled VideoToolbox `IOSurface` whose content is stale, so
-  draws succeed but sample old pixels.
-
-### Immediate next step (was interrupted)
-`host/stream_host.py --test` streams a **guaranteed-moving `testsrc2` pattern**
-(CPU lavfi, bypasses `ddagrab`), to **bisect capture-content vs iPad-display**:
-- **testsrc2 animates on iPad** → display pipeline is fine; the problem is desktop
-  capture/`ddagrab` (e.g. sparse frame emission — host runs ~18 fps not 60).
-- **testsrc2 also frozen** → the iPad decode/display pipeline is the culprit →
-  instrument next.
-
-### If display pipeline is the culprit — deeper instrumentation
-Add `NSLog` in `VideoDecoder.onDecodedFrame` printing the CVPixelBuffer address,
-`pts`, and a cheap hash of plane-0 first bytes (lock the buffer). **Read iPad console
-remotely** via `pymobiledevice3 syslog live` on Windows (filter `ipaddisplay`/
-`VideoDecoder`). This reveals whether *distinct buffers with distinct content*
-arrive:
-- content changes in the buffer but not on screen → render/present/texture bug
-  (try: create Metal textures without the cache; drop `maximumDrawableCount`/
-  `presentsWithTransaction` tweaks; check completion-handler/flush timing).
-- buffer content static → decode bug (reference-frame handling / feed order).
-
-### Cleanup owed once fixed
-Remove the debug overlay + counters from `App.swift`/`LinkServer.swift`/
-`MetalDisplayView.swift`/`DisplayRenderer.swift` (the `dec/pres/drew/texFail/noDrw`
-plumbing, `onRenderResult`, the render `Int` return codes are fine to keep). Then
-resume M7 (color deltaE), M8 (lossless still), M9 (pacing).
+### Next work, in order
+1. **Cleanup owed:** remove the debug overlay + counters from `App.swift`/
+   `LinkServer.swift`/`MetalDisplayView.swift`/`DisplayRenderer.swift` (the
+   `dec/pres/drew/texFail/noDrw` plumbing and `onRenderResult`; the render `Int`
+   return codes can stay). Requires a CI build + re-sideload.
+2. **M7 color pass:** deltaE test pattern end-to-end.
+3. **M8 lossless still path**, **M9 pacing** (INFLIGHT≤2 / FRAME_PRESENTED — note
+   the pump currently has NO frame dropping: any consumer slower than capture
+   recreates the stall→dup freeze; M9 should add latest-wins dropping).
+4. Then the virtual-display milestone (2732×2048 IddCx) for native res.
 
 ### How to run a live stream (once app is listening on :7000)
 ```bash

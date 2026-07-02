@@ -356,20 +356,22 @@ def _find_start_codes(data: bytes) -> list[tuple[int, int]]:
     """Locate Annex-B start codes. Returns [(sc_start, payload_start), ...] in
     order, recognizing both 3-byte (00 00 01) and 4-byte (00 00 00 01) prefixes.
     """
+    # bytes.find runs at C speed; a per-byte Python loop here throttled the
+    # whole live pump (ffmpeg stalled on its stdout pipe -> ddagrab emitted
+    # stale duplicate frames -> "frozen" stream). Find each 00 00 01 and widen
+    # to the 4-byte form when a zero byte precedes it.
     out: list[tuple[int, int]] = []
-    i, n = 0, len(data)
-    while i + 3 <= n:
-        if data[i] == 0 and data[i + 1] == 0:
-            if data[i + 2] == 1:
-                out.append((i, i + 3))
-                i += 3
-                continue
-            if data[i + 2] == 0 and i + 3 < n and data[i + 3] == 1:
-                out.append((i, i + 4))
-                i += 4
-                continue
-        i += 1
-    return out
+    find = data.find
+    i = 0
+    while True:
+        j = find(b"\x00\x00\x01", i)
+        if j < 0:
+            return out
+        if j > 0 and data[j - 1] == 0:
+            out.append((j - 1, j + 3))
+        else:
+            out.append((j, j + 3))
+        i = j + 3
 
 
 def split_nals(annexb: bytes) -> list[bytes]:

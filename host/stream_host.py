@@ -73,12 +73,42 @@ class AccessUnitParser:
 
     def __init__(self) -> None:
         self._buf = bytearray()
+        # Incremental scan state: start codes already located (absolute offsets
+        # into _buf) and the offset before which the buffer has been scanned.
+        # Re-scanning the whole buffer on every 64 KiB read is quadratic in the
+        # AU size — at CBR-padded AU sizes that throttled the reader below the
+        # capture rate, stalling ffmpeg (the "frozen desktop" root cause).
+        self._positions: list[tuple[int, int]] = []
+        self._scanned = 0
+
+    def _scan_new(self) -> None:
+        """Locate start codes in the not-yet-scanned tail of _buf, including a
+        3-byte lookback so a start code split across reads is still found."""
+        n = len(self._buf)
+        win = max(self._scanned - 3, 0)
+        chunk = bytes(self._buf[win:])
+        buf = self._buf
+        last_sc = self._positions[-1][0] if self._positions else -1
+        i = 0
+        while True:
+            j = chunk.find(b"\x00\x00\x01", i)
+            if j < 0:
+                break
+            a = win + j
+            # Widen to the 4-byte form against the FULL buffer: the chunk may
+            # begin mid-start-code on a rescan, hiding the leading zero.
+            sc = a - 1 if a > 0 and buf[a - 1] == 0 else a
+            if sc > last_sc:
+                self._positions.append((sc, a + 3))
+                last_sc = sc
+            i = j + 3
+        # A partial start code may end the buffer; keep a rescan margin.
+        self._scanned = max(n - 3, 0)
 
     def feed(self, data: bytes) -> list[bytes]:
         self._buf += data
-        # _find_start_codes is typed for bytes; pass an immutable bytes view of
-        # the working bytearray so the (runtime-equivalent) call is also type-clean.
-        positions = p._find_start_codes(bytes(self._buf))
+        self._scan_new()
+        positions = self._positions
         n = len(self._buf)
         # Indices (into `positions`) of start codes that begin an AUD NAL. A
         # start code can sit at the very end of the buffer before its NAL type
@@ -94,9 +124,13 @@ class AccessUnitParser:
             start = positions[aud_idxs[k]][0]
             end = positions[aud_idxs[k + 1]][0]
             aus.append(bytes(self._buf[start:end]))
-        # Retain everything from the last (still-open) AUD onward.
+        # Retain everything from the last (still-open) AUD onward, rebasing the
+        # incremental scan state to the trimmed buffer.
         keep_from = positions[aud_idxs[-1]][0]
         self._buf = self._buf[keep_from:]
+        self._positions = [(sc - keep_from, ps - keep_from)
+                           for sc, ps in positions if sc >= keep_from]
+        self._scanned = max(self._scanned - keep_from, 0)
         return aus
 
 
